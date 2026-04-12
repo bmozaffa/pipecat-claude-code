@@ -196,6 +196,7 @@ let audioCtx      = null;
 let micStream     = null;
 let scriptProc    = null;
 let isRecording   = false;
+let micBusy       = false;   // prevents double-tap during async startMic()
 let nextPlayTime  = 0;
 let botMsgEl      = null;   // current streaming bot message element
 
@@ -205,7 +206,7 @@ function connect() {
   ws = new WebSocket(WS_URL);
   ws.binaryType = 'arraybuffer';
 
-  ws.onopen  = () => setDot('connected');
+  ws.onopen  = () => { setDot('connected'); updateSendBtn(); };
   ws.onclose = () => {
     setDot('disconnected');
     stopMic();
@@ -282,15 +283,19 @@ function stopMic() {
 }
 
 async function toggleMic() {
+  if (micBusy) return;
   if (isRecording) {
     stopMic();
     setMicUI(false);
   } else {
+    micBusy = true;
     try {
       await startMic();
       setMicUI(true);
     } catch (e) {
       alert('Microphone access denied: ' + e.message);
+    } finally {
+      micBusy = false;
     }
   }
 }

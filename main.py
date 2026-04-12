@@ -23,7 +23,8 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
@@ -147,7 +148,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     stt = ElevenLabsRealtimeSTTService(
         api_key=os.getenv("ELEVENLABS_API_KEY"),
-        commit_strategy=CommitStrategy.VAD,
+        commit_strategy=CommitStrategy.MANUAL,
     )
 
     tts = ElevenLabsTTSService(
@@ -163,7 +164,10 @@ async def websocket_endpoint(websocket: WebSocket):
             }
         ]
     )
-    context_aggregator = LLMContextAggregatorPair(context)
+    context_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+    )
 
     pipeline = Pipeline(
         [
