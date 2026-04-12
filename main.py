@@ -120,6 +120,8 @@ async def index():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+
     task: PipelineTask | None = None
 
     transport = FastAPIWebsocketTransport(
@@ -184,7 +186,7 @@ async def websocket_endpoint(websocket: WebSocket):
         ]
     )
 
-    task = PipelineTask(pipeline)
+    task = PipelineTask(pipeline, enable_rtvi=False)
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
 
