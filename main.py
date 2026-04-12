@@ -1,6 +1,7 @@
 import json
 import os
 
+import aiohttp
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
@@ -28,7 +29,7 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
-from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.elevenlabs.tts import ElevenLabsHttpTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 
@@ -67,8 +68,19 @@ class BrowserFrameSerializer(FrameSerializer):
         return None
 
 
+class InputModeTracker:
+    """Shared flag: True = mic input (TTS on), False = text input (TTS off)."""
+
+    def __init__(self):
+        self.tts_enabled = True
+
+
 class TextInputProcessor(FrameProcessor):
     """Converts {"type":"text_input","text":"..."} browser messages into pipeline frames."""
+
+    def __init__(self, mode: InputModeTracker):
+        super().__init__()
+        self._mode = mode
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -77,9 +89,27 @@ class TextInputProcessor(FrameProcessor):
             if isinstance(msg, dict) and msg.get("type") == "text_input":
                 text = msg.get("text", "").strip()
                 if text:
+                    self._mode.tts_enabled = False  # text turn — suppress TTS
                     await self.push_frame(TranscriptionFrame(text=text, user_id="", timestamp=""))
                     await self.push_frame(UserStoppedSpeakingFrame())
                 return  # consume; don't forward the raw message
+        await self.push_frame(frame, direction)
+
+
+class TTSGate(FrameProcessor):
+    """Drops TextFrames going to TTS when the turn came from text input.
+    Also re-enables TTS after each response so the next mic turn works normally."""
+
+    def __init__(self, mode: InputModeTracker):
+        super().__init__()
+        self._mode = mode
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TextFrame) and not self._mode.tts_enabled:
+            return  # drop — TTS should not speak for text-mode turns
+        if isinstance(frame, LLMFullResponseEndFrame):
+            self._mode.tts_enabled = True  # re-arm for next turn
         await self.push_frame(frame, direction)
 
 
@@ -153,42 +183,47 @@ async def websocket_endpoint(websocket: WebSocket):
         commit_strategy=CommitStrategy.MANUAL,
     )
 
-    tts = ElevenLabsTTSService(
-        api_key=os.getenv("ELEVENLABS_API_KEY"),
-        voice_id=os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
-    )
+    async with aiohttp.ClientSession() as aiohttp_session:
+        tts = ElevenLabsHttpTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            voice_id=os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+            aiohttp_session=aiohttp_session,
+        )
 
-    context = LLMContext(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful, friendly assistant. Keep responses concise.",
-            }
-        ]
-    )
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
-    )
+        context = LLMContext(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful, friendly assistant. Keep responses concise.",
+                }
+            ]
+        )
+        context_aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        )
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            TextInputProcessor(),
-            stt,
-            UserTranscriptSender(),
-            context_aggregator.user(),
-            llm,
-            BotTextSender(),
-            tts,
-            transport.output(),
-            context_aggregator.assistant(),
-        ]
-    )
+        mode = InputModeTracker()
 
-    task = PipelineTask(pipeline, enable_rtvi=False)
-    runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                TextInputProcessor(mode),
+                stt,
+                UserTranscriptSender(),
+                context_aggregator.user(),
+                llm,
+                BotTextSender(),
+                TTSGate(mode),
+                tts,
+                transport.output(),
+                context_aggregator.assistant(),
+            ]
+        )
+
+        task = PipelineTask(pipeline, enable_rtvi=False)
+        runner = PipelineRunner(handle_sigint=False)
+        await runner.run(task)
 
 
 if __name__ == "__main__":

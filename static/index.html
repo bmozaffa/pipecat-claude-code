@@ -232,6 +232,9 @@ function sendJson(obj) {
 async function playWav(buf) {
   try {
     ensureAudioCtx();
+    // Chrome auto-suspends AudioContext when no source is active (e.g. after stopMic).
+    // Resume it so scheduled audio actually plays.
+    if (audioCtx.state !== 'running') await audioCtx.resume();
     // ArrayBuffer may be detached; clone it
     const decoded = await audioCtx.decodeAudioData(buf.slice(0));
     const src     = audioCtx.createBufferSource();
