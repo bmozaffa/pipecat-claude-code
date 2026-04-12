@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 
@@ -11,6 +12,7 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InputTransportMessageFrame,
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     OutputAudioRawFrame,
@@ -30,7 +32,6 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsHttpTTSService
-from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 
 load_dotenv()
@@ -113,6 +114,112 @@ class TTSGate(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class ClaudeCodeLLMService(FrameProcessor):
+    """Runs Claude Code via `sbx exec <sandbox> claude -p ...` and streams the response.
+
+    Consumes LLMContextFrame, emits LLMFullResponseStartFrame / TextFrame(s) /
+    LLMFullResponseEndFrame — the same contract as any pipecat LLM service.
+    """
+
+    def __init__(
+        self,
+        sandbox_name: str = "claude-yolo",
+        permission_mode: str = "bypassPermissions",
+        allowed_tools: str | None = None,
+    ):
+        super().__init__()
+        self._sandbox_name = sandbox_name
+        self._permission_mode = permission_mode
+        self._allowed_tools = allowed_tools
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _build_prompt(self, messages: list[dict]) -> str:
+        """Flatten the conversation history into a single prompt string."""
+        parts: list[str] = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            # Content may be a list of blocks (e.g. vision format)
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "") for block in content if isinstance(block, dict)
+                )
+            label = {"system": "System", "user": "User", "assistant": "Assistant"}.get(role, role.capitalize())
+            parts.append(f"{label}: {content}")
+        return "\n".join(parts)
+
+    def _build_cmd(self, prompt: str) -> list[str]:
+        cmd = [
+            "sbx", "exec", self._sandbox_name,
+            "claude", "-p", prompt,
+            "--output-format", "stream-json",
+            "--permission-mode", self._permission_mode,
+        ]
+        if self._allowed_tools:
+            cmd += ["--allowedTools", self._allowed_tools]
+        return cmd
+
+    # ------------------------------------------------------------------
+    # Frame processing
+    # ------------------------------------------------------------------
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if not isinstance(frame, LLMContextFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        messages = frame.context.messages
+        prompt = self._build_prompt(messages)
+        cmd = self._build_cmd(prompt)
+
+        await self.push_frame(LLMFullResponseStartFrame())
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            async for line in proc.stdout:
+                raw = line.decode("utf-8", errors="replace").strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Not JSON — forward as plain text (shouldn't happen with stream-json)
+                    await self.push_frame(TextFrame(text=raw))
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "assistant":
+                    # Extract text blocks from the assistant message content
+                    for block in event.get("message", {}).get("content", []):
+                        if block.get("type") == "text" and block.get("text"):
+                            await self.push_frame(TextFrame(text=block["text"]))
+                elif event_type == "result" and event.get("is_error"):
+                    error_msg = event.get("result", "unknown error")
+                    await self.push_frame(TextFrame(text=f"[Error: {error_msg}]"))
+
+            await proc.wait()
+
+            if proc.returncode != 0:
+                stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
+                if stderr:
+                    await self.push_frame(TextFrame(text=f"[Error: {stderr}]"))
+
+        except Exception as e:
+            await self.push_frame(TextFrame(text=f"[Claude Code error: {e}]"))
+
+        await self.push_frame(LLMFullResponseEndFrame())
+
+
 class UserTranscriptSender(FrameProcessor):
     """Sends user transcripts to the browser so they appear in the chat UI."""
 
@@ -172,10 +279,10 @@ async def websocket_endpoint(websocket: WebSocket):
         if task is not None:
             await task.cancel()
 
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY", "none"),
-        base_url=os.getenv("OPENAI_BASE_URL") or None,
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    llm = ClaudeCodeLLMService(
+        sandbox_name=os.getenv("CLAUDE_CODE_SANDBOX", "claude-yolo"),
+        permission_mode=os.getenv("CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions"),
+        allowed_tools=os.getenv("CLAUDE_CODE_ALLOWED_TOOLS") or None,
     )
 
     stt = ElevenLabsRealtimeSTTService(

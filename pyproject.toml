@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
-    "pipecat-ai[elevenlabs,openai]>=0.0.108",
+    "pipecat-ai[elevenlabs]>=0.0.108",
     "python-dotenv>=1.0",
     "uvicorn[standard]>=0.34",
 ]
