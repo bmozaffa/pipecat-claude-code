@@ -156,6 +156,7 @@ class ClaudeCodeLLMService(FrameProcessor):
             "sbx", "exec", self._sandbox_name,
             "claude", "-p", prompt,
             "--output-format", "stream-json",
+            "--verbose",
             "--permission-mode", self._permission_mode,
         ]
         if self._allowed_tools:
@@ -182,6 +183,7 @@ class ClaudeCodeLLMService(FrameProcessor):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
