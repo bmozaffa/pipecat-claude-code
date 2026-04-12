@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pipecat Chat</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3148;
+    }
+    header h1 { font-size: 1rem; font-weight: 600; letter-spacing: .02em; }
+    #status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: background .3s;
+    }
+    #status-dot.connected { background: #22c55e; }
+    #status-dot.connecting { background: #f59e0b; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* ── Chat area ── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      scroll-behavior: smooth;
+    }
+    .message {
+      max-width: 75%;
+      padding: 10px 14px;
+      border-radius: 14px;
+      line-height: 1.5;
+      font-size: .9rem;
+      word-break: break-word;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: #3b5bdb;
+      border-bottom-right-radius: 4px;
+    }
+    .message.assistant {
+      align-self: flex-start;
+      background: #1e2235;
+      border-bottom-left-radius: 4px;
+    }
+    .message.assistant.streaming { opacity: .85; }
+    .message .label {
+      font-size: .7rem;
+      opacity: .6;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    /* ── Input area ── */
+    #input-area {
+      background: #1a1d27;
+      border-top: 1px solid #2d3148;
+      padding: 12px 16px;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .tab {
+      padding: 5px 14px;
+      border-radius: 20px;
+      border: 1px solid #2d3148;
+      background: transparent;
+      color: #94a3b8;
+      font-size: .82rem;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .tab.active {
+      background: #3b5bdb;
+      border-color: #3b5bdb;
+      color: #fff;
+    }
+
+    /* Mic panel */
+    #mic-panel { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+    #mic-btn {
+      width: 64px; height: 64px;
+      border-radius: 50%;
+      border: 2px solid #3b5bdb;
+      background: #1e2235;
+      color: #e2e8f0;
+      font-size: 1.6rem;
+      cursor: pointer;
+      transition: all .15s;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #mic-btn:hover { background: #2a2f4a; }
+    #mic-btn.recording {
+      background: #ef4444;
+      border-color: #ef4444;
+      animation: mic-pulse 1s infinite;
+    }
+    @keyframes mic-pulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.4); }
+      50%      { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
+    }
+    #mic-label { font-size: .78rem; color: #64748b; }
+
+    /* Text panel */
+    #text-panel { display: none; }
+    #text-panel.active { display: flex; gap: 8px; }
+    #text-input {
+      flex: 1;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 10px 14px;
+      font-size: .9rem;
+      outline: none;
+    }
+    #text-input:focus { border-color: #3b5bdb; }
+    #send-btn {
+      padding: 10px 18px;
+      background: #3b5bdb;
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: .9rem;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #send-btn:hover { background: #4c6ef5; }
+    #send-btn:disabled { background: #2d3148; color: #64748b; cursor: default; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Pipecat Chat</h1>
+  <div id="status-dot" class="connecting" title="Connecting…"></div>
+</header>
+
+<div id="chat">
+  <div class="message assistant">
+    <div class="label">Assistant</div>
+    <div>Hello! You can speak or type to chat with me.</div>
+  </div>
+</div>
+
+<div id="input-area">
+  <div class="tabs">
+    <button class="tab active" id="tab-mic"  onclick="switchMode('mic')">🎤 Mic</button>
+    <button class="tab"        id="tab-text" onclick="switchMode('text')">⌨️ Text</button>
+  </div>
+
+  <div id="mic-panel">
+    <button id="mic-btn" onclick="toggleMic()" title="Toggle microphone">🎤</button>
+    <span id="mic-label">Click to start recording</span>
+  </div>
+
+  <div id="text-panel">
+    <input id="text-input" type="text" placeholder="Type a message…" onkeydown="onKey(event)" />
+    <button id="send-btn" onclick="sendText()" disabled>Send</button>
+  </div>
+</div>
+
+<script>
+// ─── Config ─────────────────────────────────────────────────────────────────
+const WS_URL      = `ws://${location.host}/ws`;
+const TARGET_RATE = 16000;   // Hz sent to server
+const CHUNK_SIZE  = 4096;    // ScriptProcessor buffer size
+
+// ─── State ──────────────────────────────────────────────────────────────────
+let ws            = null;
+let audioCtx      = null;
+let micStream     = null;
+let scriptProc    = null;
+let isRecording   = false;
+let nextPlayTime  = 0;
+let botMsgEl      = null;   // current streaming bot message element
+
+// ─── WebSocket ──────────────────────────────────────────────────────────────
+function connect() {
+  setDot('connecting');
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen  = () => setDot('connected');
+  ws.onclose = () => {
+    setDot('disconnected');
+    stopMic();
+    // Reconnect after 3 s
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = (e) => console.error('WS error', e);
+
+  ws.onmessage = async (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      await playWav(ev.data);
+    } else {
+      handleMsg(JSON.parse(ev.data));
+    }
+  };
+}
+
+function sendJson(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// ─── Audio playback ──────────────────────────────────────────────────────────
+async function playWav(buf) {
+  try {
+    ensureAudioCtx();
+    // ArrayBuffer may be detached; clone it
+    const decoded = await audioCtx.decodeAudioData(buf.slice(0));
+    const src     = audioCtx.createBufferSource();
+    src.buffer    = decoded;
+    src.connect(audioCtx.destination);
+    const now   = audioCtx.currentTime;
+    const start = Math.max(now, nextPlayTime);
+    src.start(start);
+    nextPlayTime = start + decoded.duration;
+  } catch (e) {
+    console.warn('Audio decode error', e);
+  }
+}
+
+// ─── Microphone ──────────────────────────────────────────────────────────────
+async function startMic() {
+  ensureAudioCtx();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+  });
+
+  const src  = audioCtx.createMediaStreamSource(micStream);
+  scriptProc = audioCtx.createScriptProcessor(CHUNK_SIZE, 1, 1);
+
+  // Silent output node — ScriptProcessor must be connected to stay alive
+  const silence = audioCtx.createGain();
+  silence.gain.value = 0;
+  scriptProc.connect(silence);
+  silence.connect(audioCtx.destination);
+
+  scriptProc.onaudioprocess = (e) => {
+    if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const f32     = e.inputBuffer.getChannelData(0);
+    const resampled = resample(f32, audioCtx.sampleRate, TARGET_RATE);
+    const pcm16   = f32ToI16(resampled);
+    ws.send(pcm16.buffer);
+  };
+
+  src.connect(scriptProc);
+  isRecording = true;
+}
+
+function stopMic() {
+  isRecording = false;
+  if (scriptProc) { scriptProc.disconnect(); scriptProc = null; }
+  if (micStream)  { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+}
+
+async function toggleMic() {
+  if (isRecording) {
+    stopMic();
+    setMicUI(false);
+  } else {
+    try {
+      await startMic();
+      setMicUI(true);
+    } catch (e) {
+      alert('Microphone access denied: ' + e.message);
+    }
+  }
+}
+
+// ─── Text input ──────────────────────────────────────────────────────────────
+function sendText() {
+  const inp = document.getElementById('text-input');
+  const text = inp.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  sendJson({ type: 'text_input', text });
+  inp.value = '';
+  updateSendBtn();
+}
+
+function onKey(e) {
+  if (e.key === 'Enter') sendText();
+}
+
+function updateSendBtn() {
+  const val = document.getElementById('text-input').value.trim();
+  document.getElementById('send-btn').disabled =
+    !val || !ws || ws.readyState !== WebSocket.OPEN;
+}
+
+document.getElementById('text-input').addEventListener('input', updateSendBtn);
+
+// ─── Message handling ────────────────────────────────────────────────────────
+function handleMsg(msg) {
+  switch (msg.type) {
+    case 'transcript':
+      addMsg('user', msg.text);
+      break;
+    case 'bot_start':
+      botMsgEl = addMsg('assistant', '', true);
+      break;
+    case 'bot_text':
+      if (botMsgEl) botMsgEl.querySelector('.body').textContent += msg.text;
+      scrollChat();
+      break;
+    case 'bot_end':
+      if (botMsgEl) botMsgEl.classList.remove('streaming');
+      botMsgEl = null;
+      break;
+  }
+}
+
+// ─── Chat UI ─────────────────────────────────────────────────────────────────
+function addMsg(role, text, streaming = false) {
+  const chat = document.getElementById('chat');
+  const el   = document.createElement('div');
+  el.className = `message ${role}${streaming ? ' streaming' : ''}`;
+  el.innerHTML = `<div class="label">${role === 'user' ? 'You' : 'Assistant'}</div>
+                  <div class="body">${escHtml(text)}</div>`;
+  chat.appendChild(el);
+  scrollChat();
+  return el;
+}
+
+function scrollChat() {
+  const chat = document.getElementById('chat');
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─── Mode switching ───────────────────────────────────────────────────────────
+function switchMode(mode) {
+  document.getElementById('tab-mic').classList.toggle('active',  mode === 'mic');
+  document.getElementById('tab-text').classList.toggle('active', mode === 'text');
+  document.getElementById('mic-panel').style.display  = mode === 'mic'  ? 'flex'  : 'none';
+  document.getElementById('text-panel').classList.toggle('active', mode === 'text');
+  if (mode === 'text') {
+    stopMic();
+    setMicUI(false);
+    document.getElementById('text-input').focus();
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function ensureAudioCtx() {
+  if (!audioCtx) audioCtx = new AudioContext();
+}
+
+function setDot(state) {
+  const d = document.getElementById('status-dot');
+  d.className = state;   // 'connecting' | 'connected' | 'disconnected'
+  d.title = state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+function setMicUI(on) {
+  const btn = document.getElementById('mic-btn');
+  const lbl = document.getElementById('mic-label');
+  btn.classList.toggle('recording', on);
+  btn.textContent = on ? '⏹' : '🎤';
+  lbl.textContent = on ? 'Recording… click to stop' : 'Click to start recording';
+}
+
+// Linear interpolation resampler
+function resample(samples, inRate, outRate) {
+  if (inRate === outRate) return samples;
+  const ratio = inRate / outRate;
+  const len   = Math.round(samples.length / ratio);
+  const out   = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const pos  = i * ratio;
+    const idx  = Math.floor(pos);
+    const frac = pos - idx;
+    const next = Math.min(idx + 1, samples.length - 1);
+    out[i] = samples[idx] * (1 - frac) + samples[next] * frac;
+  }
+  return out;
+}
+
+// Float32 → Int16
+function f32ToI16(buf) {
+  const out = new Int16Array(buf.length);
+  for (let i = 0; i < buf.length; i++) {
+    out[i] = Math.max(-32768, Math.min(32767, buf[i] * 32767));
+  }
+  return out;
+}
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+connect();
+</script>
+</body>
+</html>

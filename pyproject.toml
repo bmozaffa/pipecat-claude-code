@@ -5,5 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[elevenlabs]>=0.0.108",
+    "fastapi>=0.115",
+    "pipecat-ai[elevenlabs,openai]>=0.0.108",
+    "python-dotenv>=1.0",
+    "uvicorn[standard]>=0.34",
 ]
