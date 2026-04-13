@@ -182,7 +182,7 @@ class ClaudeCodeLLMService(FrameProcessor):
         prompt = self._build_prompt(messages)
         cmd = self._build_cmd(prompt)
 
-        logger.info(">>> Command: %s %s", " ".join(cmd), prompt)
+        logger.info(">>> Command: %s", " ".join(cmd))
 
         await self.push_frame(LLMFullResponseStartFrame())
 
