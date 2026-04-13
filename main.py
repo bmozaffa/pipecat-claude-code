@@ -135,30 +135,29 @@ class ClaudeCodeLLMService(FrameProcessor):
         self._sandbox_name = sandbox_name
         self._permission_mode = permission_mode
         self._allowed_tools = allowed_tools
+        self._session_id: str | None = None
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, messages: list[dict]) -> str:
-        """Flatten the conversation history into a single prompt string."""
-        parts: list[str] = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            # Content may be a list of blocks (e.g. vision format)
-            if isinstance(content, list):
-                content = " ".join(
-                    block.get("text", "") for block in content if isinstance(block, dict)
-                )
-            label = {"system": "System", "user": "User", "assistant": "Assistant"}.get(role, role.capitalize())
-            parts.append(f"{label}: {content}")
-        return "\n".join(parts)
+    def _get_latest_user_message(self, messages: list[dict]) -> str:
+        """Extract the most recent user message from the context."""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        block.get("text", "") for block in content if isinstance(block, dict)
+                    )
+                return content
+        return ""
 
     def _build_cmd(self, prompt: str) -> list[str]:
-        cmd = [
-            "sbx", "exec", self._sandbox_name,
-            "claude", "-p", prompt,
+        cmd = ["sbx", "exec", self._sandbox_name, "claude", "-p", prompt]
+        if self._session_id:
+            cmd += ["--resume", self._session_id]
+        cmd += [
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", self._permission_mode,
@@ -179,7 +178,7 @@ class ClaudeCodeLLMService(FrameProcessor):
             return
 
         messages = frame.context.messages
-        prompt = self._build_prompt(messages)
+        prompt = self._get_latest_user_message(messages)
         cmd = self._build_cmd(prompt)
 
         logger.info(">>> Command: %s", " ".join(cmd))
@@ -214,9 +213,14 @@ class ClaudeCodeLLMService(FrameProcessor):
                         if block.get("type") == "text" and block.get("text"):
                             response_chunks.append(block["text"])
                             await self.push_frame(TextFrame(text=block["text"]))
-                elif event_type == "result" and event.get("is_error"):
-                    error_msg = event.get("result", "unknown error")
-                    await self.push_frame(TextFrame(text=f"[Error: {error_msg}]"))
+                elif event_type == "result":
+                    session_id = event.get("session_id")
+                    if session_id:
+                        self._session_id = session_id
+                        logger.info("<<< session_id: %s", session_id)
+                    if event.get("is_error"):
+                        error_msg = event.get("result", "unknown error")
+                        await self.push_frame(TextFrame(text=f"[Error: {error_msg}]"))
 
             await proc.wait()
 
