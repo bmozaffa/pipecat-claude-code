@@ -316,7 +316,9 @@ async def websocket_endpoint(websocket: WebSocket):
     async with aiohttp.ClientSession() as aiohttp_session:
         tts = ElevenLabsHttpTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
-            voice_id=os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+            settings=ElevenLabsHttpTTSService.Settings(
+                voice=os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+            ),
             aiohttp_session=aiohttp_session,
         )
 
