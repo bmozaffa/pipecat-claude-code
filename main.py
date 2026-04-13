@@ -73,48 +73,53 @@ class BrowserFrameSerializer(FrameSerializer):
         return None
 
 
-class InputModeTracker:
-    """Shared flag: True = mic input (TTS on), False = text input (TTS off)."""
+class TTSToggle:
+    """Shared flag controlled by the browser toggle. True = speak responses aloud."""
 
     def __init__(self):
-        self.tts_enabled = True
+        self.enabled = True
 
 
 class TextInputProcessor(FrameProcessor):
-    """Converts {"type":"text_input","text":"..."} browser messages into pipeline frames."""
+    """Converts browser messages into pipeline frames.
 
-    def __init__(self, mode: InputModeTracker):
+    {"type":"text_input","text":"..."} → TranscriptionFrame + UserStoppedSpeakingFrame
+    {"type":"set_tts","enabled":bool}  → updates TTSToggle
+    """
+
+    def __init__(self, tts_toggle: TTSToggle):
         super().__init__()
-        self._mode = mode
+        self._tts_toggle = tts_toggle
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, InputTransportMessageFrame):
             msg = frame.message
-            if isinstance(msg, dict) and msg.get("type") == "text_input":
-                text = msg.get("text", "").strip()
-                if text:
-                    self._mode.tts_enabled = False  # text turn — suppress TTS
-                    await self.push_frame(TranscriptionFrame(text=text, user_id="", timestamp=""))
-                    await self.push_frame(UserStoppedSpeakingFrame())
-                return  # consume; don't forward the raw message
+            if isinstance(msg, dict):
+                if msg.get("type") == "text_input":
+                    text = msg.get("text", "").strip()
+                    if text:
+                        await self.push_frame(TranscriptionFrame(text=text, user_id="", timestamp=""))
+                        await self.push_frame(UserStoppedSpeakingFrame())
+                    return  # consume; don't forward the raw message
+                if msg.get("type") == "set_tts":
+                    self._tts_toggle.enabled = bool(msg.get("enabled", True))
+                    logger.info("TTS toggled: %s", self._tts_toggle.enabled)
+                    return  # consume
         await self.push_frame(frame, direction)
 
 
 class TTSGate(FrameProcessor):
-    """Drops TextFrames going to TTS when the turn came from text input.
-    Also re-enables TTS after each response so the next mic turn works normally."""
+    """Drops TextFrames going to TTS when the speak-response toggle is off."""
 
-    def __init__(self, mode: InputModeTracker):
+    def __init__(self, tts_toggle: TTSToggle):
         super().__init__()
-        self._mode = mode
+        self._tts_toggle = tts_toggle
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and not self._mode.tts_enabled:
-            return  # drop — TTS should not speak for text-mode turns
-        if isinstance(frame, LLMFullResponseEndFrame):
-            self._mode.tts_enabled = True  # re-arm for next turn
+        if isinstance(frame, TextFrame) and not self._tts_toggle.enabled:
+            return  # drop — user toggled speaking off
         await self.push_frame(frame, direction)
 
 
@@ -328,18 +333,18 @@ async def websocket_endpoint(websocket: WebSocket):
             user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
         )
 
-        mode = InputModeTracker()
+        tts_toggle = TTSToggle()
 
         pipeline = Pipeline(
             [
                 transport.input(),
-                TextInputProcessor(mode),
+                TextInputProcessor(tts_toggle),
                 stt,
                 UserTranscriptSender(),
                 context_aggregator.user(),
                 llm,
                 BotTextSender(),
-                TTSGate(mode),
+                TTSGate(tts_toggle),
                 tts,
                 transport.output(),
                 context_aggregator.assistant(),
