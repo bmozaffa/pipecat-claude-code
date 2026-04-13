@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 
 import aiohttp
 import uvicorn
@@ -124,7 +125,11 @@ class TTSGate(FrameProcessor):
 
 
 class ClaudeCodeLLMService(FrameProcessor):
-    """Runs Claude Code via `sbx exec <sandbox> claude -p ...` and streams the response.
+    """Runs Claude Code and streams the response.
+
+    Supports two execution modes:
+      - "sbx"  (default): runs via ``sbx exec <sandbox> claude -p ...``
+      - "ssh": runs via ``ssh <user>@<host> -- claude -p ...``
 
     Consumes LLMContextFrame, emits LLMFullResponseStartFrame / TextFrame(s) /
     LLMFullResponseEndFrame — the same contract as any pipecat LLM service.
@@ -132,12 +137,22 @@ class ClaudeCodeLLMService(FrameProcessor):
 
     def __init__(
         self,
+        execution_mode: str = "sbx",
         sandbox_name: str = "claude-yolo",
+        ssh_host: str | None = None,
+        ssh_user: str | None = None,
+        claude_path: str = "claude",
         permission_mode: str = "bypassPermissions",
         allowed_tools: str | None = None,
     ):
         super().__init__()
+        if execution_mode not in ("sbx", "ssh"):
+            raise ValueError(f"execution_mode must be 'sbx' or 'ssh', got {execution_mode!r}")
+        self._execution_mode = execution_mode
         self._sandbox_name = sandbox_name
+        self._ssh_host = ssh_host
+        self._ssh_user = ssh_user
+        self._claude_path = claude_path
         self._permission_mode = permission_mode
         self._allowed_tools = allowed_tools
         self._session_id: str | None = None
@@ -158,18 +173,29 @@ class ClaudeCodeLLMService(FrameProcessor):
                 return content
         return ""
 
-    def _build_cmd(self, prompt: str) -> list[str]:
-        cmd = ["sbx", "exec", self._sandbox_name, "claude", "-p", prompt]
+    def _build_claude_args(self, prompt: str) -> list[str]:
+        """Return the claude sub-command arguments (shared between sbx and ssh)."""
+        args = [self._claude_path, "-p", prompt]
         if self._session_id:
-            cmd += ["--resume", self._session_id]
-        cmd += [
+            args += ["--resume", self._session_id]
+        args += [
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", self._permission_mode,
         ]
         if self._allowed_tools:
-            cmd += ["--allowedTools", self._allowed_tools]
-        return cmd
+            args += ["--allowedTools", self._allowed_tools]
+        return args
+
+    def _build_cmd(self, prompt: str) -> list[str]:
+        claude_args = self._build_claude_args(prompt)
+        if self._execution_mode == "ssh":
+            # SSH passes remaining args to the remote shell joined with spaces,
+            # so we pre-quote them into a single shell-safe string.
+            remote_cmd = shlex.join(claude_args)
+            return ["ssh", f"{self._ssh_user}@{self._ssh_host}", "--", remote_cmd]
+        # Default: sbx exec
+        return ["sbx", "exec", self._sandbox_name] + claude_args
 
     # ------------------------------------------------------------------
     # Frame processing
@@ -303,7 +329,11 @@ async def websocket_endpoint(websocket: WebSocket):
             await task.cancel()
 
     llm = ClaudeCodeLLMService(
+        execution_mode=os.getenv("CLAUDE_CODE_EXECUTION_MODE", "sbx"),
         sandbox_name=os.getenv("CLAUDE_CODE_SANDBOX", "claude-yolo"),
+        ssh_host=os.getenv("CLAUDE_CODE_SSH_HOST") or None,
+        ssh_user=os.getenv("CLAUDE_CODE_SSH_USER") or None,
+        claude_path=os.getenv("CLAUDE_CODE_CLAUDE_PATH", "claude"),
         permission_mode=os.getenv("CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions"),
         allowed_tools=os.getenv("CLAUDE_CODE_ALLOWED_TOOLS") or None,
     )
