@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 
 import aiohttp
@@ -35,6 +36,9 @@ from pipecat.services.elevenlabs.tts import ElevenLabsHttpTTSService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("claude_code_llm")
 
 app = FastAPI()
 
@@ -178,7 +182,11 @@ class ClaudeCodeLLMService(FrameProcessor):
         prompt = self._build_prompt(messages)
         cmd = self._build_cmd(prompt)
 
+        logger.info(">>> Command: %s %s", " ".join(cmd), prompt)
+
         await self.push_frame(LLMFullResponseStartFrame())
+
+        response_chunks: list[str] = []
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -204,6 +212,7 @@ class ClaudeCodeLLMService(FrameProcessor):
                     # Extract text blocks from the assistant message content
                     for block in event.get("message", {}).get("content", []):
                         if block.get("type") == "text" and block.get("text"):
+                            response_chunks.append(block["text"])
                             await self.push_frame(TextFrame(text=block["text"]))
                 elif event_type == "result" and event.get("is_error"):
                     error_msg = event.get("result", "unknown error")
@@ -214,11 +223,14 @@ class ClaudeCodeLLMService(FrameProcessor):
             if proc.returncode != 0:
                 stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
                 if stderr:
+                    logger.error("<<< stderr: %s", stderr)
                     await self.push_frame(TextFrame(text=f"[Error: {stderr}]"))
 
         except Exception as e:
+            logger.exception("<<< exception running Claude Code")
             await self.push_frame(TextFrame(text=f"[Claude Code error: {e}]"))
 
+        logger.info("<<< response:\n%s", "".join(response_chunks))
         await self.push_frame(LLMFullResponseEndFrame())
 
 
@@ -301,10 +313,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
         context = LLMContext(
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful, friendly assistant. Keep responses concise.",
-                }
+                # {
+                #     "role": "system",
+                #     "content": "You are a helpful, friendly assistant. Keep responses concise.",
+                # }
             ]
         )
         context_aggregator = LLMContextAggregatorPair(
