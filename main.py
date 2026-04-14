@@ -129,7 +129,10 @@ class ClaudeCodeLLMService(FrameProcessor):
 
     Supports two execution modes:
       - "sbx"  (default): runs via ``sbx exec <sandbox> claude -p ...``
-      - "ssh": runs via ``ssh <user>@<host> -- claude -p ...``
+      - "ssh": runs via SSH.  Two sub-variants:
+          * Without ``ssh_script``: ``ssh <user>@<host> -- claude -p <prompt> ...``
+          * With ``ssh_script``: ``echo <prompt> | ssh <user>@<host> -- bash -lc <script>``
+            (prompt is fed via stdin; the remote script owns the claude invocation)
 
     Consumes LLMContextFrame, emits LLMFullResponseStartFrame / TextFrame(s) /
     LLMFullResponseEndFrame — the same contract as any pipecat LLM service.
@@ -141,6 +144,7 @@ class ClaudeCodeLLMService(FrameProcessor):
         sandbox_name: str = "claude-yolo",
         ssh_host: str | None = None,
         ssh_user: str | None = None,
+        ssh_script: str | None = None,
         claude_path: str = "claude",
         permission_mode: str = "bypassPermissions",
         allowed_tools: str | None = None,
@@ -152,6 +156,7 @@ class ClaudeCodeLLMService(FrameProcessor):
         self._sandbox_name = sandbox_name
         self._ssh_host = ssh_host
         self._ssh_user = ssh_user
+        self._ssh_script = ssh_script
         self._claude_path = claude_path
         self._permission_mode = permission_mode
         self._allowed_tools = allowed_tools
@@ -188,14 +193,15 @@ class ClaudeCodeLLMService(FrameProcessor):
         return args
 
     def _build_cmd(self, prompt: str) -> list[str]:
-        claude_args = self._build_claude_args(prompt)
         if self._execution_mode == "ssh":
-            # SSH passes remaining args to the remote shell joined with spaces,
-            # so we pre-quote them into a single shell-safe string.
-            remote_cmd = shlex.join(claude_args)
+            if self._ssh_script:
+                # Headless mode: prompt is fed via stdin; the remote script owns claude.
+                return ["ssh", f"{self._ssh_user}@{self._ssh_host}", "--", "bash", "-lc", self._ssh_script]
+            # Direct mode: pass all claude args over SSH.
+            remote_cmd = shlex.join(self._build_claude_args(prompt))
             return ["ssh", f"{self._ssh_user}@{self._ssh_host}", "--", remote_cmd]
         # Default: sbx exec
-        return ["sbx", "exec", self._sandbox_name] + claude_args
+        return ["sbx", "exec", self._sandbox_name] + self._build_claude_args(prompt)
 
     # ------------------------------------------------------------------
     # Frame processing
@@ -211,6 +217,7 @@ class ClaudeCodeLLMService(FrameProcessor):
         messages = frame.context.messages
         prompt = self._get_latest_user_message(messages)
         cmd = self._build_cmd(prompt)
+        use_stdin = self._execution_mode == "ssh" and bool(self._ssh_script)
 
         logger.info(">>> Command: %s", " ".join(cmd))
 
@@ -221,10 +228,15 @@ class ClaudeCodeLLMService(FrameProcessor):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE if use_stdin else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+
+            if use_stdin:
+                proc.stdin.write(prompt.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
 
             async for line in proc.stdout:
                 raw = line.decode("utf-8", errors="replace").strip()
@@ -333,6 +345,7 @@ async def websocket_endpoint(websocket: WebSocket):
         sandbox_name=os.getenv("CLAUDE_CODE_SANDBOX", "claude-yolo"),
         ssh_host=os.getenv("CLAUDE_CODE_SSH_HOST") or None,
         ssh_user=os.getenv("CLAUDE_CODE_SSH_USER") or None,
+        ssh_script=os.getenv("CLAUDE_CODE_SSH_SCRIPT") or None,
         claude_path=os.getenv("CLAUDE_CODE_CLAUDE_PATH", "claude"),
         permission_mode=os.getenv("CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions"),
         allowed_tools=os.getenv("CLAUDE_CODE_ALLOWED_TOOLS") or None,
