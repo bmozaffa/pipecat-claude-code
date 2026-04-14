@@ -220,6 +220,7 @@ class ClaudeCodeLLMService(FrameProcessor):
         use_stdin = self._execution_mode == "ssh" and bool(self._ssh_script)
 
         logger.info(">>> Command: %s", " ".join(cmd))
+        logger.info(">>> Prompt: %s", prompt)
 
         await self.push_frame(LLMFullResponseStartFrame())
 
@@ -238,40 +239,57 @@ class ClaudeCodeLLMService(FrameProcessor):
                 await proc.stdin.drain()
                 proc.stdin.close()
 
+            # Collect stderr concurrently so it doesn't block stdout reading.
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+            stdout_line_count = 0
             async for line in proc.stdout:
+                stdout_line_count += 1
                 raw = line.decode("utf-8", errors="replace").strip()
                 if not raw:
                     continue
                 try:
-                    event = json.loads(raw)
+                    parsed = json.loads(raw)
                 except json.JSONDecodeError:
-                    # Not JSON — forward as plain text (shouldn't happen with stream-json)
+                    # Not JSON — forward as plain text
+                    logger.info("<<< plain text line: %s", raw[:200])
                     await self.push_frame(TextFrame(text=raw))
                     continue
 
-                event_type = event.get("type")
-                if event_type == "assistant":
-                    # Extract text blocks from the assistant message content
-                    for block in event.get("message", {}).get("content", []):
-                        if block.get("type") == "text" and block.get("text"):
-                            response_chunks.append(block["text"])
-                            await self.push_frame(TextFrame(text=block["text"]))
-                elif event_type == "result":
-                    session_id = event.get("session_id")
-                    if session_id:
-                        self._session_id = session_id
-                        logger.info("<<< session_id: %s", session_id)
-                    if event.get("is_error"):
-                        error_msg = event.get("result", "unknown error")
-                        await self.push_frame(TextFrame(text=f"[Error: {error_msg}]"))
+                # claude-headless.sh may emit a single JSON array of all events,
+                # or individual JSON objects (stream-json). Normalise to a list.
+                if isinstance(parsed, list):
+                    events = [e for e in parsed if isinstance(e, dict)]
+                elif isinstance(parsed, dict):
+                    events = [parsed]
+                else:
+                    logger.info("<<< unexpected JSON value: %s", raw[:200])
+                    continue
+
+                for event in events:
+                    event_type = event.get("type")
+                    if event_type == "assistant":
+                        for block in event.get("message", {}).get("content", []):
+                            if block.get("type") == "text" and block.get("text"):
+                                response_chunks.append(block["text"])
+                                await self.push_frame(TextFrame(text=block["text"]))
+                    elif event_type == "result":
+                        session_id = event.get("session_id")
+                        if session_id:
+                            self._session_id = session_id
+                            logger.info("<<< session_id: %s", session_id)
+                        if event.get("is_error"):
+                            error_msg = event.get("result", "unknown error")
+                            await self.push_frame(TextFrame(text=f"[Error: {error_msg}]"))
 
             await proc.wait()
+            stderr_bytes = await stderr_task
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
 
+            if stderr:
+                logger.info("<<< stderr: %s", stderr)
             if proc.returncode != 0:
-                stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
-                if stderr:
-                    logger.error("<<< stderr: %s", stderr)
-                    await self.push_frame(TextFrame(text=f"[Error: {stderr}]"))
+                await self.push_frame(TextFrame(text=f"[Error: {stderr or 'non-zero exit'}]"))
 
         except Exception as e:
             logger.exception("<<< exception running Claude Code")
